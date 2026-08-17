@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+_probe_*.py
+_restore_*.py
+seen_state.json
+.git
