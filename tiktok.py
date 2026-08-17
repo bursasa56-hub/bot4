@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from httpx import AsyncClient
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +22,17 @@ TIKWM_COMMENTS_URL = "https://www.tikwm.com/api/comment/list"
 REQUEST_HEADERS = {
     "Referer": "https://www.tikwm.com/",
     "Accept": "application/json, text/plain, */*",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
 }
 
-# Не ходим в UA/KZ — оттуда почти всегда местный контент.
-SEARCH_REGIONS = ("RU", "BY", "RU", "RU", "BY")
-REQUEST_DELAY = 1.05
-MAX_RETRIES = 1
+# RU-лента tikwm часто старая. Свежие русские ролики ищем в смешанных лентах,
+# украинские/казахские отсекаем фильтром, а не регионом поиска.
+SEARCH_REGIONS = ("BY", "US", "PL", "DE", "RU", "BY")
+REQUEST_DELAY = 1.1
+MAX_RETRIES = 2
 REQUEST_TIMEOUT = 20
 ROUND_DELAY = 2.0
 AUTHOR_COOLDOWN_SECONDS = 6 * 60 * 60
@@ -180,16 +185,18 @@ def is_russian_video(video: TikTokVideo) -> bool:
 
     plain = _meaningful_text(video.title)
     cyrillic_count = len(CYRILLIC_RE.findall(f"{plain} {video.author_name}"))
-    if cyrillic_count >= 5:
+    author_cyrillic = len(CYRILLIC_RE.findall(video.author_name))
+    if cyrillic_count >= 4:
         return True
-    return video.region in RUSSIAN_REGIONS and cyrillic_count >= 3
+    # Часто описание — одни хештеги, а ник русский.
+    return author_cyrillic >= 3
 
 
 def is_fresh(video: TikTokVideo) -> bool:
     return 0 < video.create_time and video.age_seconds <= MAX_AGE_SECONDS
 
 
-async def _fetch_feed(session: AsyncClient, region: str) -> list[TikTokVideo]:
+async def _fetch_feed(session: AsyncSession, region: str) -> list[TikTokVideo]:
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -199,9 +206,9 @@ async def _fetch_feed(session: AsyncClient, region: str) -> list[TikTokVideo]:
                 headers=REQUEST_HEADERS,
                 timeout=REQUEST_TIMEOUT,
             )
-            if response.status_code == 403:
-                last_error = f"403 for {region}"
-                await asyncio.sleep(1.2 * attempt)
+            if response.status_code in {403, 429, 500, 502, 503, 531}:
+                last_error = f"HTTP {response.status_code} for {region}"
+                await asyncio.sleep(1.5 * attempt)
                 continue
             if response.status_code >= 400:
                 logger.warning("Лента %s: HTTP %s", region, response.status_code)
@@ -234,7 +241,7 @@ async def _fetch_feed(session: AsyncClient, region: str) -> list[TikTokVideo]:
     return []
 
 
-async def fetch_top_comment(session: AsyncClient, video: TikTokVideo) -> tuple[str, int]:
+async def fetch_top_comment(session: AsyncSession, video: TikTokVideo) -> tuple[str, int]:
     """Возвращает текст и число лайков у самого залайканного комментария."""
     try:
         response = await session.get(
@@ -378,7 +385,7 @@ class VideoPool:
         self._new_item.set()
         self._new_item = asyncio.Event()
 
-    async def _enrich_and_add(self, session: AsyncClient, video: TikTokVideo) -> None:
+    async def _enrich_and_add(self, session: AsyncSession, video: TikTokVideo) -> None:
         if self._is_duplicate(video):
             self._remember_id(video.video_id)
             return
@@ -396,11 +403,7 @@ class VideoPool:
 
     async def run(self) -> None:
         logger.info("Фоновый поиск видео запущен")
-        async with AsyncClient(
-            timeout=REQUEST_TIMEOUT,
-            headers=REQUEST_HEADERS,
-            follow_redirects=True,
-        ) as session:
+        async with AsyncSession(impersonate="chrome") as session:
             while not self.stop_event.is_set():
                 fallbacks: dict[str, TikTokVideo] = {}
                 added = 0

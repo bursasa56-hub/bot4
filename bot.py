@@ -207,7 +207,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(application: Application) -> None:
     pool = VideoPool()
     application.bot_data["pool"] = pool
-    application.create_task(pool.run())
+    asyncio.get_running_loop().create_task(pool.run())
 
 
 async def post_shutdown(application: Application) -> None:
