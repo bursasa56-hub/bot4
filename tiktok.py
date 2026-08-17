@@ -28,9 +28,8 @@ REQUEST_HEADERS = {
     ),
 }
 
-# RU-лента tikwm часто старая. Свежие русские ролики ищем в смешанных лентах,
-# украинские/казахские отсекаем фильтром, а не регионом поиска.
-SEARCH_REGIONS = ("BY", "US", "PL", "DE", "RU", "BY")
+# Только RU/BY. Чужие ленты тащат английский, украинский и казахский.
+SEARCH_REGIONS = ("RU", "BY", "RU", "BY", "RU")
 REQUEST_DELAY = 1.1
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 20
@@ -40,25 +39,40 @@ MAX_SEEN_IDS = 4000
 SEEN_STATE_PATH = Path(__file__).resolve().parent / "seen_state.json"
 
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 HASHTAG_OR_MENTION_RE = re.compile(r"[#@]\S+")
 URL_RE = re.compile(r"https?://\S+", re.I)
 SPACE_RE = re.compile(r"\s+")
 UKRAINIAN_LETTERS_RE = re.compile(r"[ІіЇїЄєҐґ]")
 KAZAKH_LETTERS_RE = re.compile(r"[ӘәҒғҚқҢңӨөҰұҮүҺһ]")
+BELARUSIAN_LETTERS_RE = re.compile(r"[Ўў]")
 UKRAINIAN_WORDS_RE = re.compile(
     r"(?i)(?<![А-Яа-яЁёІіЇїЄєҐґ])"
     r"(це|що|або|від|мені|тобі|дуже|зараз|можна|треба|дякую|привіт|"
     r"гарно|гарний|також|нічого|україн|київ|львів|харків|одеса|"
-    r"дніпро|будь ласка|тому що)"
+    r"дніпро|будь ласка|тому що|відео|дякуючи|сьогодні|"
+    r"якщо|який|яка|які|буде|було)"
     r"(?![А-Яа-яЁёІіЇїЄєҐґ])"
 )
 KAZAKH_WORDS_RE = re.compile(
     r"(?i)(?<![А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһ])"
-    r"(және|үшін|бұл|емес|қазақ|алматы|астана|шымкент|жақсы|рақмет)"
+    r"(және|үшін|бұл|емес|қазақ|алматы|астана|шымкент|жақсы|рақмет|"
+    r"керек|қалай|неге)"
     r"(?![А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһ])"
 )
-REJECT_REGIONS = {"UA", "KZ", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD"}
-RUSSIAN_REGIONS = {"RU", "BY"}
+RUSSIAN_HINT_RE = re.compile(
+    r"(?i)(?<![А-Яа-яЁё])"
+    r"(это|как|что|меня|тебя|просто|очень|сегодня|когда|если|можно|надо|"
+    r"почему|вообще|такой|такое|видео|смотри|привет|всем|здесь|теперь|"
+    r"хочу|будет|после|только|больше|лучше|короче|реально|москва|питер|"
+    r"россия|русск|бля|блин|типа|вообщем|короче)"
+    r"(?![А-Яа-яЁё])"
+)
+ALLOWED_REGIONS = {"RU", "BY"}
+REJECT_REGIONS = {
+    "UA", "KZ", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD",
+    "US", "GB", "DE", "PL", "TR", "IN", "PK", "BD", "ID", "PH", "BR", "MX",
+}
 
 
 @dataclass(slots=True)
@@ -174,22 +188,30 @@ def _title_fingerprint(video: TikTokVideo) -> str:
 def is_russian_video(video: TikTokVideo) -> bool:
     if video.region in REJECT_REGIONS:
         return False
+    if video.region and video.region not in ALLOWED_REGIONS:
+        return False
 
     blob = " ".join(part for part in (video.title, video.author_name) if part)
     if not blob:
         return False
     if UKRAINIAN_LETTERS_RE.search(blob) or KAZAKH_LETTERS_RE.search(blob):
         return False
+    if BELARUSIAN_LETTERS_RE.search(blob):
+        return False
     if UKRAINIAN_WORDS_RE.search(blob) or KAZAKH_WORDS_RE.search(blob):
         return False
 
+    # Ник и хештеги не считаем: из-за них пролезал английский/украинский.
     plain = _meaningful_text(video.title)
-    cyrillic_count = len(CYRILLIC_RE.findall(f"{plain} {video.author_name}"))
-    author_cyrillic = len(CYRILLIC_RE.findall(video.author_name))
-    if cyrillic_count >= 4:
-        return True
-    # Часто описание — одни хештеги, а ник русский.
-    return author_cyrillic >= 3
+    if len(plain) < 8:
+        return False
+    cyrillic_count = len(CYRILLIC_RE.findall(plain))
+    latin_count = len(LATIN_RE.findall(plain))
+    if cyrillic_count < 8:
+        return False
+    if latin_count >= cyrillic_count:
+        return False
+    return bool(RUSSIAN_HINT_RE.search(plain) or cyrillic_count >= 12)
 
 
 def is_fresh(video: TikTokVideo) -> bool:
