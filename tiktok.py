@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from curl_cffi.requests import AsyncSession
+from httpx import AsyncClient
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ def is_fresh(video: TikTokVideo) -> bool:
     return 0 < video.create_time and video.age_seconds <= MAX_AGE_SECONDS
 
 
-async def _fetch_feed(session: AsyncSession, region: str) -> list[TikTokVideo]:
+async def _fetch_feed(session: AsyncClient, region: str) -> list[TikTokVideo]:
     last_error = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -234,7 +234,7 @@ async def _fetch_feed(session: AsyncSession, region: str) -> list[TikTokVideo]:
     return []
 
 
-async def fetch_top_comment(session: AsyncSession, video: TikTokVideo) -> tuple[str, int]:
+async def fetch_top_comment(session: AsyncClient, video: TikTokVideo) -> tuple[str, int]:
     """Возвращает текст и число лайков у самого залайканного комментария."""
     try:
         response = await session.get(
@@ -378,7 +378,7 @@ class VideoPool:
         self._new_item.set()
         self._new_item = asyncio.Event()
 
-    async def _enrich_and_add(self, session: AsyncSession, video: TikTokVideo) -> None:
+    async def _enrich_and_add(self, session: AsyncClient, video: TikTokVideo) -> None:
         if self._is_duplicate(video):
             self._remember_id(video.video_id)
             return
@@ -396,7 +396,11 @@ class VideoPool:
 
     async def run(self) -> None:
         logger.info("Фоновый поиск видео запущен")
-        async with AsyncSession(impersonate="chrome") as session:
+        async with AsyncClient(
+            timeout=REQUEST_TIMEOUT,
+            headers=REQUEST_HEADERS,
+            follow_redirects=True,
+        ) as session:
             while not self.stop_event.is_set():
                 fallbacks: dict[str, TikTokVideo] = {}
                 added = 0
