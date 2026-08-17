@@ -29,10 +29,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_DESCRIPTION = (
-    "👋 Привет! Я бот для поиска вирусных <b>русских</b> роликов TikTok.\n\n"
+    "👋 Привет! Я бот для поиска вирусных роликов TikTok "
+    "из <b>России, Беларуси и Казахстана</b>.\n\n"
     "Ищу в фоне ещё до твоего сообщения, поэтому ссылки прилетают сразу, "
     "как только в запасе есть ролики:\n"
-    "• на русском языке\n"
+    "• регион: Россия / Беларусь / Казахстан\n"
     "• выложены меньше 36 часов назад\n"
     "• в первую очередь с 10 000+ лайками\n\n"
     "Остановить поток: /stop"
@@ -169,7 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if _is_running(chat_id):
         await update.message.reply_text(
-            "Я уже присылаю русские видео.\nОстановить: /stop"
+            "Я уже присылаю видео.\nОстановить: /stop"
         )
         return
 

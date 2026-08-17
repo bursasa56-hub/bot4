@@ -28,8 +28,8 @@ REQUEST_HEADERS = {
     ),
 }
 
-# Только RU/BY. Чужие ленты тащат английский, украинский и казахский.
-SEARCH_REGIONS = ("RU", "BY", "RU", "BY", "RU")
+# Россия, Беларусь, Казахстан. Украину не берём.
+SEARCH_REGIONS = ("RU", "KZ", "BY", "RU", "KZ", "BY")
 REQUEST_DELAY = 1.1
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 20
@@ -38,14 +38,12 @@ AUTHOR_COOLDOWN_SECONDS = 6 * 60 * 60
 MAX_SEEN_IDS = 4000
 SEEN_STATE_PATH = Path(__file__).resolve().parent / "seen_state.json"
 
-CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһЎў]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 HASHTAG_OR_MENTION_RE = re.compile(r"[#@]\S+")
 URL_RE = re.compile(r"https?://\S+", re.I)
 SPACE_RE = re.compile(r"\s+")
 UKRAINIAN_LETTERS_RE = re.compile(r"[ІіЇїЄєҐґ]")
-KAZAKH_LETTERS_RE = re.compile(r"[ӘәҒғҚқҢңӨөҰұҮүҺһ]")
-BELARUSIAN_LETTERS_RE = re.compile(r"[Ўў]")
 UKRAINIAN_WORDS_RE = re.compile(
     r"(?i)(?<![А-Яа-яЁёІіЇїЄєҐґ])"
     r"(це|що|або|від|мені|тобі|дуже|зараз|можна|треба|дякую|привіт|"
@@ -54,23 +52,19 @@ UKRAINIAN_WORDS_RE = re.compile(
     r"якщо|який|яка|які|буде|було)"
     r"(?![А-Яа-яЁёІіЇїЄєҐґ])"
 )
-KAZAKH_WORDS_RE = re.compile(
-    r"(?i)(?<![А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһ])"
-    r"(және|үшін|бұл|емес|қазақ|алматы|астана|шымкент|жақсы|рақмет|"
-    r"керек|қалай|неге)"
-    r"(?![А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһ])"
-)
 RUSSIAN_HINT_RE = re.compile(
     r"(?i)(?<![А-Яа-яЁё])"
     r"(это|как|что|меня|тебя|просто|очень|сегодня|когда|если|можно|надо|"
     r"почему|вообще|такой|такое|видео|смотри|привет|всем|здесь|теперь|"
     r"хочу|будет|после|только|больше|лучше|короче|реально|москва|питер|"
-    r"россия|русск|бля|блин|типа|вообщем|короче)"
+    r"россия|русск|бля|блин|типа)"
     r"(?![А-Яа-яЁё])"
 )
-ALLOWED_REGIONS = {"RU", "BY"}
+KAZAKH_HINT_RE = re.compile(r"[ӘәҒғҚқҢңӨөҰұҮүҺһ]")
+BELARUSIAN_HINT_RE = re.compile(r"[Ўў]")
+ALLOWED_REGIONS = {"RU", "BY", "KZ"}
 REJECT_REGIONS = {
-    "UA", "KZ", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD",
+    "UA", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD",
     "US", "GB", "DE", "PL", "TR", "IN", "PK", "BD", "ID", "PH", "BR", "MX",
 }
 
@@ -194,24 +188,21 @@ def is_russian_video(video: TikTokVideo) -> bool:
     blob = " ".join(part for part in (video.title, video.author_name) if part)
     if not blob:
         return False
-    if UKRAINIAN_LETTERS_RE.search(blob) or KAZAKH_LETTERS_RE.search(blob):
-        return False
-    if BELARUSIAN_LETTERS_RE.search(blob):
-        return False
-    if UKRAINIAN_WORDS_RE.search(blob) or KAZAKH_WORDS_RE.search(blob):
+    if UKRAINIAN_LETTERS_RE.search(blob) or UKRAINIAN_WORDS_RE.search(blob):
         return False
 
-    # Ник и хештеги не считаем: из-за них пролезал английский/украинский.
     plain = _meaningful_text(video.title)
-    if len(plain) < 8:
+    if len(plain) < 6:
         return False
     cyrillic_count = len(CYRILLIC_RE.findall(plain))
     latin_count = len(LATIN_RE.findall(plain))
-    if cyrillic_count < 8:
+    if cyrillic_count < 6:
         return False
     if latin_count >= cyrillic_count:
         return False
-    return bool(RUSSIAN_HINT_RE.search(plain) or cyrillic_count >= 12)
+    if KAZAKH_HINT_RE.search(plain) or BELARUSIAN_HINT_RE.search(plain):
+        return True
+    return bool(RUSSIAN_HINT_RE.search(plain) or cyrillic_count >= 10)
 
 
 def is_fresh(video: TikTokVideo) -> bool:
@@ -459,7 +450,7 @@ class VideoPool:
                         elif video.likes >= FALLBACK_LIKES:
                             fallbacks[video.video_id] = video
                     logger.info(
-                        "Лента %s: всего %s, свежих %s, русских %s, с 10к+ %s, в пуле %s",
+                        "Лента %s: всего %s, свежих %s, своих %s, с 10к+ %s, в пуле %s",
                         region,
                         len(videos),
                         fresh,
