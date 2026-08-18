@@ -14,10 +14,12 @@ from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-MIN_LIKES = 10_000
-FALLBACK_LIKES = 1_000
+MIN_LIKES_FRESH = 5_000
+MIN_LIKES_OLDER = 10_000
+FRESH_WINDOW_SECONDS = 24 * 60 * 60
 MAX_AGE_SECONDS = 36 * 60 * 60
 TIKWM_FEED_URL = "https://www.tikwm.com/api/feed/list"
+TIKWM_SEARCH_URL = "https://www.tikwm.com/api/feed/search"
 TIKWM_COMMENTS_URL = "https://www.tikwm.com/api/comment/list"
 REQUEST_HEADERS = {
     "Referer": "https://www.tikwm.com/",
@@ -30,6 +32,14 @@ REQUEST_HEADERS = {
 
 # Россия, Беларусь, Казахстан. Украину не берём.
 SEARCH_REGIONS = ("RU", "KZ", "BY", "RU", "KZ", "BY")
+SEARCH_QUERIES = (
+    "меллстрой",
+    "стример",
+    "блогер",
+    "тиктокер",
+    "пранк",
+    "братишкин",
+)
 REQUEST_DELAY = 1.1
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 20
@@ -62,6 +72,22 @@ RUSSIAN_HINT_RE = re.compile(
 )
 KAZAKH_HINT_RE = re.compile(r"[ӘәҒғҚқҢңӨөҰұҮүҺһ]")
 BELARUSIAN_HINT_RE = re.compile(r"[Ўў]")
+JUNK_RE = re.compile(
+    r"(?i)chiropractic|backpain|medical treatment|остеохондроз|позвоночник|"
+    r"лечени[ея]|упражнен|диабет|гипертон|гастрит|молитв|православ|"
+    r"рецепт|выпечк|пирожк|похуден|диета|огород|дачн|вязан|"
+    r"пенсионер|для души|народн(ый|ое) средств"
+)
+YOUTH_RE = re.compile(
+    r"(?i)"
+    r"мел+строй|mellstroy|стример|стримерш|блогер|тиктокер|tiktoker|"
+    r"ютубер|твич|\btwitch\b|донат|аукцион|"
+    r"братишкин|bratishkinoff|bratishkin|эвелон|evelone|"
+    r"бустер|\bbuster\b|влада4|\ba4\b|eeoneguy|ивангай|"
+    r"карнавал|tenderlybae|инстасамка|instasamka|морген|morgenshtern|"
+    r"макан|\bmacan\b|пранк|рофл|кринж|хайп|коллаб|вайб|"
+    r"hardplay|хардплей|престор|koresh|кореш"
+)
 ALLOWED_REGIONS = {"RU", "BY", "KZ"}
 REJECT_REGIONS = {
     "UA", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD",
@@ -205,6 +231,28 @@ def is_russian_video(video: TikTokVideo) -> bool:
     return bool(RUSSIAN_HINT_RE.search(plain) or cyrillic_count >= 10)
 
 
+def is_junk_video(video: TikTokVideo) -> bool:
+    blob = " ".join(part for part in (video.title, video.author_name) if part)
+    return bool(JUNK_RE.search(blob))
+
+
+def is_youth_video(video: TikTokVideo) -> bool:
+    blob = " ".join(
+        part for part in (video.title, video.author_id, video.author_name) if part
+    )
+    return bool(YOUTH_RE.search(blob))
+
+
+def min_likes_for(video: TikTokVideo) -> int:
+    if video.age_seconds <= FRESH_WINDOW_SECONDS:
+        return MIN_LIKES_FRESH
+    return MIN_LIKES_OLDER
+
+
+def has_enough_likes(video: TikTokVideo) -> bool:
+    return video.likes >= min_likes_for(video)
+
+
 def is_fresh(video: TikTokVideo) -> bool:
     return 0 < video.create_time and video.age_seconds <= MAX_AGE_SECONDS
 
@@ -251,6 +299,62 @@ async def _fetch_feed(session: AsyncSession, region: str) -> list[TikTokVideo]:
             await asyncio.sleep(0.4)
 
     logger.warning("Не удалось получить ленту %s: %s", region, last_error)
+    return []
+
+
+def _videos_from_payload(payload: object) -> list[TikTokVideo]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    items: list[object]
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = list(data.get("videos") or data.get("itemList") or [])
+    else:
+        items = []
+    videos: list[TikTokVideo] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        video = parse_video(item)
+        if video:
+            videos.append(video)
+    return videos
+
+
+async def _fetch_search(session: AsyncSession, query: str) -> list[TikTokVideo]:
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = await session.get(
+                TIKWM_SEARCH_URL,
+                params={"keywords": query, "count": 20, "region": "RU"},
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code in {403, 429, 500, 502, 503, 531}:
+                last_error = f"HTTP {response.status_code} for {query}"
+                await asyncio.sleep(1.5 * attempt)
+                continue
+            if response.status_code >= 400:
+                logger.warning("Поиск %s: HTTP %s", query, response.status_code)
+                return []
+            payload = response.json()
+            message = str(payload.get("msg") or "")
+            if "limit" in message.lower():
+                last_error = message
+                await asyncio.sleep(REQUEST_DELAY)
+                continue
+            if payload.get("code") not in (0, "0", None):
+                logger.warning("Поиск %s: %s", query, message)
+                return []
+            return _videos_from_payload(payload)
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning("Ошибка поиска %s (попытка %s): %s", query, attempt, exc)
+            await asyncio.sleep(0.4)
+    logger.warning("Не удалось искать %s: %s", query, last_error)
     return []
 
 
@@ -418,15 +522,19 @@ class VideoPool:
         logger.info("Фоновый поиск видео запущен")
         async with AsyncSession(impersonate="chrome") as session:
             while not self.stop_event.is_set():
-                fallbacks: dict[str, TikTokVideo] = {}
                 added = 0
-                for index, region in enumerate(SEARCH_REGIONS):
+                jobs: list[tuple[str, str]] = [("feed", region) for region in SEARCH_REGIONS]
+                jobs.extend(("search", query) for query in SEARCH_QUERIES)
+                for index, (kind, value) in enumerate(jobs):
                     if self.stop_event.is_set():
                         return
                     if index:
                         await asyncio.sleep(REQUEST_DELAY)
-                    videos = await _fetch_feed(session, region)
-                    fresh = russian = matched = 0
+                    if kind == "search":
+                        videos = await _fetch_search(session, value)
+                    else:
+                        videos = await _fetch_feed(session, value)
+                    fresh = russian = youth = matched = 0
                     for video in videos:
                         if not is_fresh(video):
                             continue
@@ -434,42 +542,36 @@ class VideoPool:
                         if not is_russian_video(video):
                             continue
                         russian += 1
+                        if is_junk_video(video):
+                            continue
+                        if not is_youth_video(video):
+                            continue
+                        youth += 1
                         if self._is_duplicate(video):
                             self._remember_id(video.video_id)
                             continue
-                        if video.likes >= MIN_LIKES:
-                            matched += 1
-                            added += 1
-                            logger.info(
-                                "В пул: %s, %s лайков, %s с назад",
-                                video.video_id,
-                                video.likes,
-                                video.age_seconds,
-                            )
-                            await self._enrich_and_add(session, video)
-                        elif video.likes >= FALLBACK_LIKES:
-                            fallbacks[video.video_id] = video
+                        if not has_enough_likes(video):
+                            continue
+                        matched += 1
+                        added += 1
+                        logger.info(
+                            "В пул: %s, %s лайков, порог %s, %s с назад",
+                            video.video_id,
+                            video.likes,
+                            min_likes_for(video),
+                            video.age_seconds,
+                        )
+                        await self._enrich_and_add(session, video)
                     logger.info(
-                        "Лента %s: всего %s, свежих %s, своих %s, с 10к+ %s, в пуле %s",
-                        region,
+                        "%s %s: всего %s, свежих %s, своих %s, молодёжных %s, залётных %s, в пуле %s",
+                        "Поиск" if kind == "search" else "Лента",
+                        value,
                         len(videos),
                         fresh,
                         russian,
+                        youth,
                         matched,
                         len(self.videos),
                     )
-
-                if added == 0 and fallbacks:
-                    ranked = sorted(fallbacks.values(), key=lambda item: item.likes, reverse=True)
-                    for video in ranked:
-                        if self._is_duplicate(video):
-                            self._remember_id(video.video_id)
-                            continue
-                        logger.info(
-                            "В пул (запасной порог): %s, %s лайков",
-                            video.video_id,
-                            video.likes,
-                        )
-                        await self._enrich_and_add(session, video)
 
                 await asyncio.sleep(ROUND_DELAY)
