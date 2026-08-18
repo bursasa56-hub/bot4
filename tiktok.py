@@ -29,7 +29,7 @@ REQUEST_HEADERS = {
     ),
 }
 
-# Россия, Беларусь, Казахстан. Украину не берём.
+# Россия, Беларусь, Казахстан. Тематику (меллстрой, пранки и т.д.) не фильтруем.
 SEARCH_REGIONS = ("RU", "KZ", "BY")
 REQUEST_DELAY = 1.05
 MAX_RETRIES = 1
@@ -40,11 +40,11 @@ AUTHOR_COOLDOWN_SECONDS = 25 * 60
 MAX_SEEN_IDS = 4000
 SEEN_STATE_PATH = Path(__file__).resolve().parent / "seen_state.json"
 
-CYRILLIC_RE = re.compile(r"[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһЎў]")
-LATIN_RE = re.compile(r"[A-Za-z]")
 HASHTAG_OR_MENTION_RE = re.compile(r"[#@]\S+")
 URL_RE = re.compile(r"https?://\S+", re.I)
 SPACE_RE = re.compile(r"\s+")
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһЎў]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 UKRAINIAN_LETTERS_RE = re.compile(r"[ІіЇїЄєҐґ]")
 UKRAINIAN_WORDS_RE = re.compile(
     r"(?i)(?<![А-Яа-яЁёІіЇїЄєҐґ])"
@@ -64,12 +64,6 @@ RUSSIAN_HINT_RE = re.compile(
 )
 KAZAKH_HINT_RE = re.compile(r"[ӘәҒғҚқҢңӨөҰұҮүҺһ]")
 BELARUSIAN_HINT_RE = re.compile(r"[Ўў]")
-JUNK_RE = re.compile(
-    r"(?i)chiropractic|backpain|medical treatment|остеохондроз|позвоночник|"
-    r"лечени[ея]|упражнен|диабет|гипертон|гастрит|молитв|православ|"
-    r"рецепт|выпечк|пирожк|похуден|диета|огород|дачн|вязан|"
-    r"пенсионер|для души|народн(ый|ое) средств"
-)
 ALLOWED_REGIONS = {"RU", "BY", "KZ"}
 REJECT_REGIONS = {
     "UA", "UZ", "KG", "TJ", "AZ", "AM", "GE", "MD",
@@ -187,7 +181,7 @@ def _title_fingerprint(video: TikTokVideo) -> str:
     return text
 
 
-def is_russian_video(video: TikTokVideo) -> bool:
+def is_allowed_video(video: TikTokVideo) -> bool:
     if video.region in REJECT_REGIONS:
         return False
     if video.region and video.region not in ALLOWED_REGIONS:
@@ -211,11 +205,6 @@ def is_russian_video(video: TikTokVideo) -> bool:
     if KAZAKH_HINT_RE.search(plain) or BELARUSIAN_HINT_RE.search(plain):
         return True
     return bool(RUSSIAN_HINT_RE.search(plain) or cyrillic_count >= 10)
-
-
-def is_junk_video(video: TikTokVideo) -> bool:
-    blob = " ".join(part for part in (video.title, video.author_name) if part)
-    return bool(JUNK_RE.search(blob))
 
 
 def min_likes_for(video: TikTokVideo) -> int:
@@ -456,17 +445,15 @@ class VideoPool:
                     if index:
                         await asyncio.sleep(REQUEST_DELAY)
                     videos = await _fetch_feed(session, region)
-                    fresh = russian = matched = 0
+                    fresh = own = matched = 0
                     found_now = False
                     for video in videos:
                         if not is_fresh(video):
                             continue
                         fresh += 1
-                        if not is_russian_video(video):
+                        if not is_allowed_video(video):
                             continue
-                        russian += 1
-                        if is_junk_video(video):
-                            continue
+                        own += 1
                         if self._is_duplicate(video):
                             self._remember_id(video.video_id)
                             continue
@@ -490,7 +477,7 @@ class VideoPool:
                         region,
                         len(videos),
                         fresh,
-                        russian,
+                        own,
                         matched,
                         len(self.videos),
                     )
