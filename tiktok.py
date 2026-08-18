@@ -19,7 +19,6 @@ MIN_LIKES_OLDER = 10_000
 FRESH_WINDOW_SECONDS = 24 * 60 * 60
 MAX_AGE_SECONDS = 36 * 60 * 60
 TIKWM_FEED_URL = "https://www.tikwm.com/api/feed/list"
-TIKWM_SEARCH_URL = "https://www.tikwm.com/api/feed/search"
 TIKWM_COMMENTS_URL = "https://www.tikwm.com/api/comment/list"
 REQUEST_HEADERS = {
     "Referer": "https://www.tikwm.com/",
@@ -30,18 +29,8 @@ REQUEST_HEADERS = {
     ),
 }
 
-# Сначала поиск по хайпу, ленты — запасной круг.
+# Россия, Беларусь, Казахстан. Украину не берём.
 SEARCH_REGIONS = ("RU", "KZ", "BY")
-SEARCH_QUERIES = (
-    "меллстрой",
-    "стример",
-    "блогер",
-    "тиктокер",
-    "пранк",
-    "братишкин",
-    "эвелон",
-    "хайп",
-)
 REQUEST_DELAY = 1.05
 MAX_RETRIES = 1
 REQUEST_TIMEOUT = 12
@@ -80,16 +69,6 @@ JUNK_RE = re.compile(
     r"лечени[ея]|упражнен|диабет|гипертон|гастрит|молитв|православ|"
     r"рецепт|выпечк|пирожк|похуден|диета|огород|дачн|вязан|"
     r"пенсионер|для души|народн(ый|ое) средств"
-)
-YOUTH_RE = re.compile(
-    r"(?i)"
-    r"мел+строй|mellstroy|стример|стримерш|блогер|тиктокер|tiktoker|"
-    r"ютубер|твич|\btwitch\b|донат|аукцион|"
-    r"братишкин|bratishkinoff|bratishkin|эвелон|evelone|"
-    r"бустер|\bbuster\b|влада4|\ba4\b|eeoneguy|ивангай|"
-    r"карнавал|tenderlybae|инстасамка|instasamka|морген|morgenshtern|"
-    r"макан|\bmacan\b|пранк|рофл|кринж|хайп|коллаб|вайб|"
-    r"hardplay|хардплей|престор|koresh|кореш"
 )
 ALLOWED_REGIONS = {"RU", "BY", "KZ"}
 REJECT_REGIONS = {
@@ -239,13 +218,6 @@ def is_junk_video(video: TikTokVideo) -> bool:
     return bool(JUNK_RE.search(blob))
 
 
-def is_youth_video(video: TikTokVideo) -> bool:
-    blob = " ".join(
-        part for part in (video.title, video.author_id, video.author_name) if part
-    )
-    return bool(YOUTH_RE.search(blob))
-
-
 def min_likes_for(video: TikTokVideo) -> int:
     if video.age_seconds <= FRESH_WINDOW_SECONDS:
         return MIN_LIKES_FRESH
@@ -302,62 +274,6 @@ async def _fetch_feed(session: AsyncSession, region: str) -> list[TikTokVideo]:
             await asyncio.sleep(0.4)
 
     logger.warning("Не удалось получить ленту %s: %s", region, last_error)
-    return []
-
-
-def _videos_from_payload(payload: object) -> list[TikTokVideo]:
-    if not isinstance(payload, dict):
-        return []
-    data = payload.get("data")
-    items: list[object]
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = list(data.get("videos") or data.get("itemList") or [])
-    else:
-        items = []
-    videos: list[TikTokVideo] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        video = parse_video(item)
-        if video:
-            videos.append(video)
-    return videos
-
-
-async def _fetch_search(session: AsyncSession, query: str) -> list[TikTokVideo]:
-    last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = await session.get(
-                TIKWM_SEARCH_URL,
-                params={"keywords": query, "count": 20, "region": "RU"},
-                headers=REQUEST_HEADERS,
-                timeout=REQUEST_TIMEOUT,
-            )
-            if response.status_code in {403, 429, 500, 502, 503, 531}:
-                last_error = f"HTTP {response.status_code} for {query}"
-                await asyncio.sleep(1.5 * attempt)
-                continue
-            if response.status_code >= 400:
-                logger.warning("Поиск %s: HTTP %s", query, response.status_code)
-                return []
-            payload = response.json()
-            message = str(payload.get("msg") or "")
-            if "limit" in message.lower():
-                last_error = message
-                await asyncio.sleep(REQUEST_DELAY)
-                continue
-            if payload.get("code") not in (0, "0", None):
-                logger.warning("Поиск %s: %s", query, message)
-                return []
-            return _videos_from_payload(payload)
-        except Exception as exc:
-            last_error = str(exc)
-            logger.warning("Ошибка поиска %s (попытка %s): %s", query, attempt, exc)
-            await asyncio.sleep(0.4)
-    logger.warning("Не удалось искать %s: %s", query, last_error)
     return []
 
 
@@ -534,18 +450,13 @@ class VideoPool:
             last_found = 0.0
             while not self.stop_event.is_set():
                 added = 0
-                jobs: list[tuple[str, str]] = [("search", query) for query in SEARCH_QUERIES]
-                jobs.extend(("feed", region) for region in SEARCH_REGIONS)
-                for index, (kind, value) in enumerate(jobs):
+                for index, region in enumerate(SEARCH_REGIONS):
                     if self.stop_event.is_set():
                         return
                     if index:
                         await asyncio.sleep(REQUEST_DELAY)
-                    if kind == "search":
-                        videos = await _fetch_search(session, value)
-                    else:
-                        videos = await _fetch_feed(session, value)
-                    fresh = russian = youth = matched = 0
+                    videos = await _fetch_feed(session, region)
+                    fresh = russian = matched = 0
                     found_now = False
                     for video in videos:
                         if not is_fresh(video):
@@ -556,9 +467,6 @@ class VideoPool:
                         russian += 1
                         if is_junk_video(video):
                             continue
-                        if not is_youth_video(video):
-                            continue
-                        youth += 1
                         if self._is_duplicate(video):
                             self._remember_id(video.video_id)
                             continue
@@ -578,13 +486,11 @@ class VideoPool:
                         found_now = True
                         break
                     logger.info(
-                        "%s %s: всего %s, свежих %s, своих %s, молодёжных %s, залётных %s, в пуле %s",
-                        "Поиск" if kind == "search" else "Лента",
-                        value,
+                        "Лента %s: всего %s, свежих %s, своих %s, залётных %s, в пуле %s",
+                        region,
                         len(videos),
                         fresh,
                         russian,
-                        youth,
                         matched,
                         len(self.videos),
                     )
