@@ -30,8 +30,8 @@ REQUEST_HEADERS = {
     ),
 }
 
-# Россия, Беларусь, Казахстан. Украину не берём.
-SEARCH_REGIONS = ("RU", "KZ", "BY", "RU", "KZ", "BY")
+# Сначала поиск по хайпу, ленты — запасной круг.
+SEARCH_REGIONS = ("RU", "KZ", "BY")
 SEARCH_QUERIES = (
     "меллстрой",
     "стример",
@@ -39,12 +39,15 @@ SEARCH_QUERIES = (
     "тиктокер",
     "пранк",
     "братишкин",
+    "эвелон",
+    "хайп",
 )
-REQUEST_DELAY = 1.1
-MAX_RETRIES = 2
-REQUEST_TIMEOUT = 20
-ROUND_DELAY = 2.0
-AUTHOR_COOLDOWN_SECONDS = 6 * 60 * 60
+REQUEST_DELAY = 1.05
+MAX_RETRIES = 1
+REQUEST_TIMEOUT = 12
+ROUND_DELAY = 0.4
+FIND_INTERVAL = 150
+AUTHOR_COOLDOWN_SECONDS = 25 * 60
 MAX_SEEN_IDS = 4000
 SEEN_STATE_PATH = Path(__file__).resolve().parent / "seen_state.json"
 
@@ -363,9 +366,9 @@ async def fetch_top_comment(session: AsyncSession, video: TikTokVideo) -> tuple[
     try:
         response = await session.get(
             TIKWM_COMMENTS_URL,
-            params={"url": video.tiktok_url, "count": 30, "cursor": 0},
+            params={"url": video.tiktok_url, "count": 20, "cursor": 0},
             headers=REQUEST_HEADERS,
-            timeout=REQUEST_TIMEOUT,
+            timeout=8,
         )
         if response.status_code >= 400:
             logger.warning("Комментарии %s: HTTP %s", video.video_id, response.status_code)
@@ -506,7 +509,6 @@ class VideoPool:
         if self._is_duplicate(video):
             self._remember_id(video.video_id)
             return
-        await asyncio.sleep(REQUEST_DELAY)
         text, likes = await fetch_top_comment(session, video)
         video.top_comment = text
         video.top_comment_likes = likes
@@ -518,13 +520,22 @@ class VideoPool:
         except TimeoutError:
             return
 
+    async def _sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        try:
+            await asyncio.wait_for(self.stop_event.wait(), timeout=seconds)
+        except TimeoutError:
+            return
+
     async def run(self) -> None:
         logger.info("Фоновый поиск видео запущен")
         async with AsyncSession(impersonate="chrome") as session:
+            last_found = 0.0
             while not self.stop_event.is_set():
                 added = 0
-                jobs: list[tuple[str, str]] = [("feed", region) for region in SEARCH_REGIONS]
-                jobs.extend(("search", query) for query in SEARCH_QUERIES)
+                jobs: list[tuple[str, str]] = [("search", query) for query in SEARCH_QUERIES]
+                jobs.extend(("feed", region) for region in SEARCH_REGIONS)
                 for index, (kind, value) in enumerate(jobs):
                     if self.stop_event.is_set():
                         return
@@ -535,6 +546,7 @@ class VideoPool:
                     else:
                         videos = await _fetch_feed(session, value)
                     fresh = russian = youth = matched = 0
+                    found_now = False
                     for video in videos:
                         if not is_fresh(video):
                             continue
@@ -562,6 +574,9 @@ class VideoPool:
                             video.age_seconds,
                         )
                         await self._enrich_and_add(session, video)
+                        last_found = time.time()
+                        found_now = True
+                        break
                     logger.info(
                         "%s %s: всего %s, свежих %s, своих %s, молодёжных %s, залётных %s, в пуле %s",
                         "Поиск" if kind == "search" else "Лента",
@@ -573,5 +588,12 @@ class VideoPool:
                         matched,
                         len(self.videos),
                     )
+                    if found_now:
+                        break
 
-                await asyncio.sleep(ROUND_DELAY)
+                wait_for = FIND_INTERVAL - (time.time() - last_found)
+                if added and wait_for > 0:
+                    logger.info("Пауза %.0f с до следующего ролика", wait_for)
+                    await self._sleep(wait_for)
+                elif not added:
+                    await self._sleep(ROUND_DELAY)
